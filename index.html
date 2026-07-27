@@ -75,6 +75,17 @@ html,body{margin:0;padding:0;width:100%;min-height:100%;background:var(--mint-50
 .goal-foot{display:flex;justify-content:space-between;margin-top:8px;font-size:10.5px;font-weight:700;color:var(--muted);flex-wrap:wrap;gap:4px}
 .goal-foot b{color:var(--ink)}
 .pace-up{color:var(--green-700)}.pace-down{color:var(--loss-400)}
+.alloc-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px}
+.alloc-seg{background:var(--mint-50);border:1px solid var(--border);border-radius:11px;padding:10px}
+.alloc-top{display:flex;flex-direction:column;gap:3px}
+.alloc-lbl{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.alloc-lbl.tap{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+.alloc-val{font-size:16px;font-weight:800}
+.goal-fill.over{background:linear-gradient(90deg,#E0604F,#8A2E24)!important}
+.alloc-warn{margin-top:10px;font-size:11.5px;font-weight:700;color:var(--loss-700);
+  background:var(--loss-100);border-radius:9px;padding:8px 11px}
+.tap{cursor:pointer}
+@media(max-width:560px){.alloc-val{font-size:14px}}
 
 /* ===== CHARTS ===== */
 .charts{display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px}
@@ -302,6 +313,7 @@ async function unlock(pin){
       if(rows&&rows[0]&&rows[0].data){
         app.entries=rows[0].data.entries||[];
         app.items=rows[0].data.items||[];
+        app.spends=rows[0].data.spends||[];
         app.settings=rows[0].data.settings||app.settings;
         await saveState();
         await fetch(SUPABASE_URL+"/rest/v1/pnl_calendar_data?id=eq."+LEGACY_ROW,{
@@ -327,12 +339,12 @@ function esc(s){if(s===null||s===undefined)return"";return String(s).replace(/&/
 /* ---------- storage ---------- */
 function loadLocalCache(){
   try{const raw=localStorage.getItem(STORAGE_KEY);
-    if(raw){const p=JSON.parse(raw);return{entries:p.entries||[],items:p.items||[],settings:p.settings||{goal:2100}}}
+    if(raw){const p=JSON.parse(raw);return{entries:p.entries||[],items:p.items||[],spends:p.spends||[],settings:Object.assign({goal:2100,allocation:{reinvest:70,save:20,keep:10},restaurantCap:50,strict:true},p.settings||{})}}
   }catch(e){}
-  return{entries:[],items:[],settings:{goal:2100}};
+  return{entries:[],items:[],spends:[],settings:{goal:2100,allocation:{reinvest:70,save:20,keep:10},restaurantCap:50,strict:true}};
 }
 function saveLocalCache(){
-  try{localStorage.setItem(STORAGE_KEY,JSON.stringify({entries:app.entries,items:app.items,settings:app.settings}))}
+  try{localStorage.setItem(STORAGE_KEY,JSON.stringify({entries:app.entries,items:app.items,spends:app.spends,settings:app.settings}))}
   catch(e){console.error("local save failed",e)}
 }
 async function loadFromSupabase(){
@@ -344,6 +356,7 @@ async function loadFromSupabase(){
     if(rows&&rows[0]&&rows[0].data){
       app.entries=rows[0].data.entries||[];
       app.items=rows[0].data.items||[];
+      app.spends=rows[0].data.spends||[];
       app.settings=rows[0].data.settings||app.settings;
       saveLocalCache();
     }
@@ -358,7 +371,7 @@ async function saveState(){
       method:"POST",
       headers:{apikey:SUPABASE_KEY,Authorization:"Bearer "+SUPABASE_KEY,
         "Content-Type":"application/json",Prefer:"resolution=merge-duplicates"},
-      body:JSON.stringify({id:ROW_ID,data:{entries:app.entries,items:app.items,settings:app.settings}})});
+      body:JSON.stringify({id:ROW_ID,data:{entries:app.entries,items:app.items,spends:app.spends,settings:app.settings}})});
     if(!res.ok)throw new Error("save "+res.status);
     app.syncStatus="synced";
   }catch(e){console.error("supabase save failed",e);app.syncStatus="offline"}
@@ -369,7 +382,8 @@ async function saveState(){
 const today=new Date();
 const _lc=loadLocalCache();
 const app={
-  entries:_lc.entries, items:_lc.items, settings:_lc.settings,
+  entries:_lc.entries, items:_lc.items, settings:_lc.settings, spends:_lc.spends||[],
+  spendModalOpen:false,
   locked:true,
   viewYear:today.getFullYear(), viewMonth:today.getMonth(),
   selectedDay:null, tab:"pnl", statsView:"month", syncStatus:"loading",
@@ -611,6 +625,103 @@ function renderGoal(prefix){
         :'<span>Need <b class="mono">'+euro(needPerDay)+'</b>/day for '+daysLeft+' more days</span>')+
     '</div>'+
   '</div>';
+}
+
+function monthProfit(prefix){
+  return app.entries.filter(e=>e.date&&e.date.startsWith(prefix)).reduce((a,e)=>a+entryProfit(e),0);
+}
+function monthSpend(prefix){
+  return (app.spends||[]).filter(s=>s.date&&s.date.startsWith(prefix));
+}
+function editAllocation(){
+  const a=app.settings.allocation||{reinvest:70,save:20,keep:10};
+  const r=prompt("Reinvest % (growth/stock):",a.reinvest);if(r===null)return;
+  const s=prompt("Save % (cushion → investing):",a.save);if(s===null)return;
+  const k=prompt("Keep % (yours to spend):",a.keep);if(k===null)return;
+  const R=parseFloat(r),S=parseFloat(s),K=parseFloat(k);
+  if([R,S,K].some(isNaN)){toast("Numbers only");return}
+  if(Math.round(R+S+K)!==100){toast("Must add up to 100 (got "+(R+S+K)+")");return}
+  app.settings.allocation={reinvest:R,save:S,keep:K};saveState();
+}
+function editRestaurantCap(){
+  const v=prompt("Monthly eating-out cap (€):",app.settings.restaurantCap||50);
+  if(v===null)return;const n=parseFloat(v);if(!isNaN(n)&&n>=0){app.settings.restaurantCap=n;saveState()}
+}
+function toggleStrict(){app.settings.strict=!app.settings.strict;saveState();toast(app.settings.strict?"Strict mode ON":"Advisory mode")}
+function openSpend(){app.spendModalOpen=true;render()}
+function closeSpend(){app.spendModalOpen=false;render()}
+function submitSpend(){
+  const amt=parseFloat(document.getElementById("sp-amt").value);
+  const cat=document.getElementById("sp-cat").value;
+  const date=document.getElementById("sp-date").value||todayStr();
+  const note=(document.getElementById("sp-note").value||"").trim();
+  if(isNaN(amt)||amt<=0){toast("Enter amount");return}
+  if(!app.spends)app.spends=[];
+  app.spends.push({id:uid(),amt,cat,date,note});
+  app.spendModalOpen=false;saveState();
+  toast("Logged −"+euro(amt)+" · "+cat);
+}
+function deleteSpend(id){app.spends=(app.spends||[]).filter(s=>s.id!==id);saveState()}
+
+function renderBudget(prefix){
+  const a=app.settings.allocation||{reinvest:70,save:20,keep:10};
+  const profit=Math.max(0,monthProfit(prefix));
+  const reinvest=profit*a.reinvest/100;
+  const save=profit*a.save/100;
+  const keepBudget=profit*a.keep/100;
+  const spends=monthSpend(prefix);
+  const spent=spends.reduce((x,s)=>x+s.amt,0);
+  const rest=spends.filter(s=>s.cat==="Eating out").reduce((x,s)=>x+s.amt,0);
+  const cap=app.settings.restaurantCap||50;
+  const free=keepBudget-spent;
+  const freePct=keepBudget>0?Math.min(100,spent/keepBudget*100):0;
+  const over=free<0;
+  const restOver=rest>cap;
+  const seg=(label,val,pctv,cls,onclick)=>
+    '<div class="alloc-seg">'+
+      '<div class="alloc-top"><span class="alloc-lbl'+(onclick?" tap":"")+'"'+(onclick?' onclick="'+onclick+'"':"")+'>'+label+' · '+pctv+'%</span>'+
+      '<span class="alloc-val mono '+cls+'">'+euro0(val)+'</span></div>'+
+    '</div>';
+  return '<div class="card goal-card">'+
+    '<div class="goal-top">'+
+      '<span class="goal-title">Profit allocation'+(app.settings.strict?"":" · advisory")+'</span>'+
+      '<span class="goal-nums mono"><button class="pin-reset" onclick="toggleStrict()">'+(app.settings.strict?"STRICT":"ADVISORY")+'</button> <button class="pin-reset" onclick="editAllocation()">edit</button></span>'+
+    '</div>'+
+    '<div class="alloc-grid">'+
+      seg("Reinvest",reinvest,a.reinvest,"v-pos")+
+      seg("Save",save,a.save,"v-gold")+
+      seg("Keep",keepBudget,a.keep,"")+
+    '</div>'+
+    '<div style="margin-top:12px">'+
+      '<div class="goal-top"><span class="goal-title">Free to spend</span>'+
+        '<span class="goal-nums mono"><span class="cur '+(over?"v-neg":"")+'">'+euro(free)+'</span> <span style="color:var(--muted2)">/ '+euro0(keepBudget)+'</span></span></div>'+
+      '<div class="goal-bar"><div class="goal-fill'+(over?" over":"")+'" style="width:'+freePct+'%;'+(over?"background:linear-gradient(90deg,#E0604F,#8A2E24)":"")+'"></div></div>'+
+      '<div class="goal-foot">'+
+        '<span onclick="editRestaurantCap()" class="tap">Eating out: <b class="mono '+(restOver?"v-neg":"")+'">'+euro0(rest)+'</b> / '+euro0(cap)+' cap</span>'+
+        '<span>Spent total: <b class="mono">'+euro0(spent)+'</b></span>'+
+      '</div>'+
+      (over&&app.settings.strict?'<div class="alloc-warn">⛔ Over budget — Keep bucket empty. Save & Reinvest are locked.</div>':"")+
+      (restOver?'<div class="alloc-warn">🍽️ Over eating-out cap by '+euro0(rest-cap)+'.</div>':"")+
+    '</div>'+
+    '<button class="btn btn-primary btn-block" style="margin-top:12px" onclick="openSpend()">+ Log spending</button>'+
+  '</div>';
+}
+
+function renderSpendModal(){
+  if(!app.spendModalOpen)return"";
+  const cats=["Eating out","Wants","Fun / going out","Other"];
+  return '<div class="modal-overlay" onclick="if(event.target===this)closeSpend()">'+
+    '<div class="modal-box" onclick="event.stopPropagation()">'+
+    '<div class="modal-head"><span class="title">Log spending</span>'+
+    '<button class="modal-close" onclick="closeSpend()">'+icon("x",18)+"</button></div>"+
+    '<div class="grid2">'+
+    '<div class="field"><label>Amount €</label><input id="sp-amt" type="number" step="0.01" inputmode="decimal" placeholder="7.00"/></div>'+
+    '<div class="field"><label>Date</label><input id="sp-date" type="date" value="'+todayStr()+'"/></div>'+
+    '</div>'+
+    '<div class="field"><label>Category</label><select id="sp-cat">'+cats.map(c=>'<option>'+c+'</option>').join("")+'</select></div>'+
+    '<div class="field"><label>Note (optional)</label><input id="sp-note" type="text" placeholder="kebab"/></div>'+
+    '<button class="btn btn-primary btn-block" onclick="submitSpend()">Save</button>'+
+  '</div></div>';
 }
 
 function renderCharts(prefix){
@@ -919,11 +1030,11 @@ function render(){
     '<button class="log-btn" onclick="openAddModal()">LOG SALE</button>'+
     "</div>"+
     (app.tab==="pnl"
-      ?renderKpis(viewEntries)+renderGoal(monthPrefix)+renderCharts(monthPrefix)+
+      ?renderKpis(viewEntries)+renderGoal(monthPrefix)+renderBudget(monthPrefix)+renderCharts(monthPrefix)+
        '<div class="main2"><div>'+renderCalendar()+renderDetail()+'</div>'+
        '<div class="side-col">'+renderLeaderboard(monthPrefix)+renderRecords(monthPrefix)+'</div></div>'
       :renderInventory())+
-    renderModal()+renderItemModal();
+    renderModal()+renderItemModal()+renderSpendModal();
   toggleBoostField();
   attachTips();
 }
